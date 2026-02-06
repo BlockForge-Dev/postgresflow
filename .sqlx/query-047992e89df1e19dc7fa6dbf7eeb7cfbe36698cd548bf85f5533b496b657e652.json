@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE jobs\n            SET status = 'dlq',\n                dlq_reason_code = $3,\n                dlq_at = now(),\n                locked_at = NULL,\n                locked_by = NULL,\n                lock_expires_at = NULL,\n                updated_at = now(),\n                last_error_code = $4,\n                last_error_message = $5\n            WHERE id = $1\n              AND locked_by = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "047992e89df1e19dc7fa6dbf7eeb7cfbe36698cd548bf85f5533b496b657e652"
+}

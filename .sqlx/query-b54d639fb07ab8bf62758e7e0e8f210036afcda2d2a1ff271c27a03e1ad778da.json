@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM job_attempts\n            WHERE job_id = ANY($1)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b54d639fb07ab8bf62758e7e0e8f210036afcda2d2a1ff271c27a03e1ad778da"
+}

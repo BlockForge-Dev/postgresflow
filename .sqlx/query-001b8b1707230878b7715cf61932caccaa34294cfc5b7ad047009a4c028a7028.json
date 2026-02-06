@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO jobs (\n                queue, job_type, payload_json, run_at, status, priority, max_attempts,\n                locked_at, locked_by, lock_expires_at,\n                dlq_reason_code, dlq_at,\n                replay_of_job_id\n            )\n            VALUES (\n                $1, $2, $3, $4, 'queued', $5, $6,\n                NULL, NULL, NULL,\n                NULL, NULL,\n                $7\n            )\n            RETURNING id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Jsonb",
+        "Timestamptz",
+        "Int4",
+        "Int4",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "001b8b1707230878b7715cf61932caccaa34294cfc5b7ad047009a4c028a7028"
+}

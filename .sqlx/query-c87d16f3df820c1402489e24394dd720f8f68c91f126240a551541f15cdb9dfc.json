@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO policy_decisions (id, job_id, decision, reason_code, details_json)\n                VALUES ($1, $2, 'THROTTLED', 'IN_FLIGHT_EXCEEDED', $3)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c87d16f3df820c1402489e24394dd720f8f68c91f126240a551541f15cdb9dfc"
+}

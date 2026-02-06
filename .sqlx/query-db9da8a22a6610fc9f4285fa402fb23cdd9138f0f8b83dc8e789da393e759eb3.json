@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE job_attempts\n            SET status = 'succeeded',\n                finished_at = now(),\n                latency_ms = $2\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "db9da8a22a6610fc9f4285fa402fb23cdd9138f0f8b83dc8e789da393e759eb3"
+}

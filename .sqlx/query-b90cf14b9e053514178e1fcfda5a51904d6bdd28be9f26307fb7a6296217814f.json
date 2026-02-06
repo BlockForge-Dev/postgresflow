@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM jobs j\n            USING jobs_archive a\n            WHERE j.id = a.id\n              AND j.status = 'succeeded'\n              AND j.updated_at < $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b90cf14b9e053514178e1fcfda5a51904d6bdd28be9f26307fb7a6296217814f"
+}

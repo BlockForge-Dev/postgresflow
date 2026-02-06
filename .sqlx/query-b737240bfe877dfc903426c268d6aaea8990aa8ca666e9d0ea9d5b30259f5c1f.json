@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO queue_policies(queue, max_attempts_per_minute, max_in_flight, throttle_delay_ms)\n            VALUES ($1, $2, $3, $4)\n            ON CONFLICT(queue) DO UPDATE\n            SET max_attempts_per_minute = EXCLUDED.max_attempts_per_minute,\n                max_in_flight = EXCLUDED.max_in_flight,\n                throttle_delay_ms = EXCLUDED.throttle_delay_ms\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b737240bfe877dfc903426c268d6aaea8990aa8ca666e9d0ea9d5b30259f5c1f"
+}
