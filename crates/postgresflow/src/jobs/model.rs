@@ -1,9 +1,13 @@
 use chrono::{DateTime, Utc};
+
 use serde_json::Value;
+
 use uuid::Uuid;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Job {
+    pub replay_of_job_id: Option<Uuid>,
+
     pub id: Uuid,
     pub queue: String,
     pub job_type: String,
@@ -16,6 +20,9 @@ pub struct Job {
     pub locked_at: Option<DateTime<Utc>>,
     pub locked_by: Option<String>,
     pub lock_expires_at: Option<DateTime<Utc>>,
+
+    pub dlq_reason_code: Option<String>,
+    pub dlq_at: Option<DateTime<Utc>>,
 
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

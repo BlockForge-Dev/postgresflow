@@ -8,3 +8,8 @@ pub async fn make_pool(database_url: &str) -> anyhow::Result<PgPool> {
 
     Ok(pool)
 }
+
+pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
+    sqlx::migrate!("./migrations").run(pool).await?;
+    Ok(())
+}

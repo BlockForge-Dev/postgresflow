@@ -1,1 +1,296 @@
-# postgresflow
+## Quickstart (Docker)
+
+1. Copy env template:
+
+- Windows PowerShell:
+  cp .env.example .env
+
+2. Start:
+
+docker compose up --build
+
+3. Seed demo jobs (no psql needed):
+
+docker compose exec pgflow ./pgflowctl demo
+
+4. View admin UI / API:
+
+http://localhost:3003/
+
+Endpoints:
+
+- GET /jobs
+- POST /jobs
+- /jobs/:id/timeline
+- /jobs/:id/explain
+- /jobs/:id/replay
+- /dlq
+- /ingest/decisions
+- /metrics (JSON)
+- /metrics/prom (Prometheus text)
+- /health
+
+Disable the admin API by setting `PGFLOW_ADMIN_ADDR=off` in `.env`.
+Warning: the admin API is fully open in this version (no built-in auth). Keep it on localhost/private networks, or put it behind a trusted gateway before public exposure.
+
+## Verification (Exact Steps)
+
+1. DLQ view:
+
+curl http://localhost:3003/dlq
+
+2. Metrics (last 60s window):
+
+curl http://localhost:3003/metrics
+
+3. Timeline for a failed job:
+
+curl http://localhost:3003/jobs/JOB_ID/timeline
+
+## Testing Before Commit (Detailed)
+
+1. Fast compile and test-build checks (no database needed):
+
+```powershell
+cargo check -p postgresflow
+cargo test -p postgresflow --no-run
+```
+
+Expected result: both commands finish successfully. Warnings are acceptable; errors are not.
+
+2. Targeted API behavior test tied to timeline endpoints in `crates/postgresflow/src/api/mod.rs`:
+
+```powershell
+$env:TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/postgresflow_test"
+cargo test -p postgresflow --test timeline -- --nocapture
+```
+
+Expected result: `test timeline_shows_attempt_story ... ok`.
+
+If you see `TEST_DATABASE_URL missing`, set the variable and rerun.
+
+3. Full integration suite:
+
+```powershell
+$env:TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/postgresflow_test"
+$env:RUST_TEST_THREADS="1"
+$env:RUSTFLAGS="-D warnings"
+cargo test -p postgresflow -- --nocapture
+```
+
+Equivalent helper script:
+
+```powershell
+$env:TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/postgresflow_test"
+.\scripts\tests\ci.ps1
+```
+
+4. Manual API smoke test (no auth required):
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:3003/jobs -ContentType "application/json" -Body '{"queue":"default","job_type":"email_send","payload_json":{"user_id":123}}'
+Invoke-RestMethod -Uri "http://localhost:3003/jobs?limit=5"
+Invoke-RestMethod -Uri "http://localhost:3003/metrics"
+Invoke-RestMethod -Uri "http://localhost:3003/dlq"
+```
+
+Expected result: enqueue returns a `job_id`, list/metrics/dlq endpoints return JSON without `Authorization` headers.
+
+5. Teardown (if you started infra for tests):
+
+```powershell
+docker compose down
+```
+
+## Test Evidence (Local)
+
+This project was tested locally using Docker Compose and the admin API. Example evidence below
+shows successful enqueue, retry/DLQ path, timeline, metrics, and guardrails.
+Outputs will differ per run.
+
+Environment:
+
+- OS: Windows
+- Start: `docker compose up --build`
+
+Commands and sample outputs:
+
+Enqueue success:
+
+```
+Invoke-RestMethod -Method Post -Uri http://localhost:3003/jobs -ContentType "application/json" -Body $body
+# { "job_id": "JOB_ID_SUCCESS" }
+```
+
+Enqueue failure (DLQ path):
+
+```
+Invoke-RestMethod -Method Post -Uri http://localhost:3003/jobs -ContentType "application/json" -Body $failBody
+# { "job_id": "JOB_ID_FAIL" }
+```
+
+Timeline (success):
+
+```
+Invoke-RestMethod -Uri "http://localhost:3003/jobs/JOB_ID_SUCCESS/timeline"
+# status: succeeded
+```
+
+Timeline (fail + retries):
+
+```
+Invoke-RestMethod -Uri "http://localhost:3003/jobs/JOB_ID_FAIL/timeline"
+# status: queued -> retries -> dlq after max_attempts
+```
+
+DLQ:
+
+```
+Invoke-RestMethod -Uri "http://localhost:3003/dlq"
+# items: [ ... job_type=fail_me, status=dlq, dlq_reason_code=MAX_ATTEMPTS_EXCEEDED ... ]
+```
+
+Metrics (JSON + Prom):
+
+```
+Invoke-RestMethod -Uri "http://localhost:3003/metrics"
+Invoke-WebRequest -Uri "http://localhost:3003/metrics/prom" -UseBasicParsing
+```
+
+Guardrail (payload too large):
+
+```
+Invoke-RestMethod -Method Post -Uri http://localhost:3003/jobs -ContentType "application/json" -Body $bigBody
+# HTTP 413 PAYLOAD_TOO_LARGE
+Invoke-RestMethod -Uri "http://localhost:3003/ingest/decisions"
+# reason_code: PAYLOAD_TOO_LARGE
+```
+
+## Live Metrics Watch (Demo Run)
+
+PowerShell:
+
+.\scripts\metrics\watch.ps1
+
+Optional parameters:
+
+- `-IntervalSeconds 1`
+- `-Queue default`
+- `-BaseUrl http://localhost:3003`
+
+## Integration Tests (Docker DB)
+
+docker compose up -d db
+
+# then (PowerShell)
+
+$env:TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/postgresflow_test"
+$env:RUST_TEST_THREADS="1"
+$env:RUSTFLAGS="-D warnings"
+cargo test -p postgresflow -- --nocapture
+
+## Benchmarks
+
+Load test script (Docker):
+
+bash scripts/load/run.sh WORKERS JOBS
+
+Example:
+
+bash scripts/load/run.sh 4 20000
+
+Outputs approximate jobs/sec and basic container stats.
+Note: total workers = 1 (pgflow) + <workers> (worker profile).
+Windows: run from Git Bash or WSL.
+
+## Integration (Production)
+
+### Enqueue via HTTP
+
+POST /jobs
+
+Example:
+
+curl -X POST http://localhost:3003/jobs \
+ -H "Content-Type: application/json" \
+ -d '{"queue":"default","job_type":"email_send","payload_json":{"user_id":123},"priority":0,"max_attempts":25}'
+
+### Enqueue via Rust
+
+Use `JobsRepo::enqueue_*` plus `EnqueueGuard` in your producer service to enforce limits
+and write ingest_decisions for rejected payloads/rates.
+
+### Worker Logic
+
+Replace the simulated work in `crates/worker/src/main.rs` with real job handlers.
+Pattern:
+
+- lease job
+- start attempt
+- run handler based on job_type
+- call `runner.on_success(...)` or `runner.on_failure(...)`
+  Handlers should return meaningful error codes (e.g., `TIMEOUT`, `BAD_PAYLOAD`, `UNKNOWN_JOB_TYPE`).
+  Handlers can be registered with per-handler concurrency limits and timeouts in `crates/worker/src/handlers.rs`.
+
+### Scaling Workers
+
+Start extra workers (admin stays on pgflow):
+
+docker compose --profile worker up -d --scale worker=4
+
+### Security and Isolation
+
+- Bind admin to localhost or a private network in production.
+- Run the admin API behind a reverse proxy with TLS if exposed beyond localhost.
+
+### Configuration (Key Env Vars)
+
+- `PGFLOW_MAX_PAYLOAD_BYTES` and `PGFLOW_MAX_ENQUEUE_PER_MINUTE` for guardrails.
+- `PGFLOW_LEASE_SECONDS` for lock timeouts.
+- `ARCHIVE_SUCCEEDED_AFTER_DAYS` and `PRUNE_HISTORY_AFTER_DAYS` for retention.
+
+## Production Checklist
+
+- Configure enqueue guardrails: `PGFLOW_MAX_PAYLOAD_BYTES`, `PGFLOW_MAX_ENQUEUE_PER_MINUTE`.
+- Tune retry policy and max_attempts per job type.
+- Move admin API behind TLS if exposed beyond localhost.
+- Monitor `/metrics/prom` and DB health (connections, WAL, disk).
+
+## Invariants
+
+- Every attempt is recorded with error_code, error_message, worker_id, and latency.
+- Every retry or DLQ transition preserves lineage in job history.
+- Leasing is exclusive per job (no two workers hold the same job at once).
+- Execution is at-least-once; handlers must be idempotent.
+- DLQ is explicit and queryable with a reason code.
+- Policy decisions (throttles) are persisted for inspection.
+- Replay creates a new job with a pointer to the original.
+
+## Why This Pattern
+
+- One datastore (Postgres) for both durability and coordination.
+- Strong consistency and transactional leasing.
+- Low ops overhead: no extra brokers, simple local setup.
+
+## Tradeoffs and Constraints
+
+- Throughput is bounded by a single Postgres primary.
+- Heavy write volume competes with application workloads.
+- Very large payloads or extremely high enqueue rates require guardrails.
+- Long-running jobs reduce effective concurrency unless tuned.
+- Exactly-once execution is not guaranteed; design handlers accordingly.
+
+## What Scales
+
+- Horizontal workers (stateless).
+- Multiple queues with per-queue policies.
+- Read-heavy admin and metrics endpoints.
+
+## Constraints to Watch
+
+- Index health on jobs/job_attempts for high volumes.
+- Connection pool sizing in workers and admin API.
+- Disk I/O and WAL growth under sustained throughput.
+- Vacuum/autovacuum tuning for large job tables.
+
+

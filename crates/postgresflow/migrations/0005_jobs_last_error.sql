@@ -1,0 +1,3 @@
+ALTER TABLE jobs
+ADD COLUMN IF NOT EXISTS last_error_code TEXT,
+ADD COLUMN IF NOT EXISTS last_error_message TEXT;
