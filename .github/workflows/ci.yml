@@ -20,7 +20,7 @@ jobs:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgresflow_test
         ports:
-          - 5432:5432
+          - 5432/tcp
         options: >-
           --health-cmd "pg_isready -U postgres -d postgresflow_test"
           --health-interval 10s
@@ -28,8 +28,8 @@ jobs:
           --health-retries 10
 
     env:
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgresflow_test
-      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgresflow_test
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports[5432] }}/postgresflow_test
+      TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports[5432] }}/postgresflow_test
       RUST_TEST_THREADS: "1"
 
     steps:
