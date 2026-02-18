@@ -1,3 +1,45 @@
+## Step-by-Step Setup (Windows PowerShell)
+
+1. Prerequisites:
+
+- Docker Desktop is installed and running.
+- Rust toolchain is installed (`rustup`, `cargo`).
+
+2. Create your local env file:
+
+```powershell
+cp .env.example .env
+```
+
+3. Start services:
+
+```powershell
+docker compose up --build -d
+```
+
+4. Verify service health:
+
+```powershell
+Invoke-WebRequest -Uri http://localhost:3003/health -UseBasicParsing
+```
+
+5. Run the full postgresflow test suite (with strict warnings):
+
+```powershell
+docker compose up -d db
+$env:TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/postgresflow_test"
+$env:DATABASE_URL=$env:TEST_DATABASE_URL
+$env:RUST_TEST_THREADS="1"
+$env:RUSTFLAGS="-D warnings"
+.\scripts\tests\ci.ps1
+```
+
+6. Stop services when done:
+
+```powershell
+docker compose down
+```
+
 ## Quickstart (Docker)
 
 1. Copy env template:
@@ -73,6 +115,7 @@ If you see `TEST_DATABASE_URL missing`, set the variable and rerun.
 
 ```powershell
 $env:TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/postgresflow_test"
+$env:DATABASE_URL=$env:TEST_DATABASE_URL
 $env:RUST_TEST_THREADS="1"
 $env:RUSTFLAGS="-D warnings"
 cargo test -p postgresflow -- --nocapture
@@ -82,6 +125,7 @@ Equivalent helper script:
 
 ```powershell
 $env:TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/postgresflow_test"
+$env:DATABASE_URL=$env:TEST_DATABASE_URL
 .\scripts\tests\ci.ps1
 ```
 
@@ -180,14 +224,16 @@ Optional parameters:
 
 ## Integration Tests (Docker DB)
 
+```powershell
 docker compose up -d db
-
-# then (PowerShell)
-
 $env:TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/postgresflow_test"
+$env:DATABASE_URL=$env:TEST_DATABASE_URL
 $env:RUST_TEST_THREADS="1"
 $env:RUSTFLAGS="-D warnings"
-cargo test -p postgresflow -- --nocapture
+.\scripts\tests\ci.ps1
+```
+
+If you see `TEST_DATABASE_URL missing` or `DATABASE_URL must be set`, set both env vars as shown above.
 
 ## Benchmarks
 

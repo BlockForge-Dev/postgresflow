@@ -1,26 +1,12 @@
 use serde_json::json;
-use sqlx::PgPool;
-
-use postgresflow::db;
 use postgresflow::jobs::{AttemptsRepo, JobsRepo};
 
-async fn test_pool() -> PgPool {
-    let database_url =
-        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
-    db::make_pool(&database_url).await.expect("pool")
-}
+mod common;
+use common::setup_db;
 
 #[tokio::test]
 async fn worker_crash_mid_job_another_worker_recovers_after_lease_expiry() -> anyhow::Result<()> {
-    let pool = test_pool().await;
-
-    // Clean
-    sqlx::query("TRUNCATE TABLE job_attempts RESTART IDENTITY CASCADE")
-        .execute(&pool)
-        .await?;
-    sqlx::query("TRUNCATE TABLE jobs RESTART IDENTITY CASCADE")
-        .execute(&pool)
-        .await?;
+    let pool = setup_db().await;
 
     let jobs = JobsRepo::new(pool.clone());
     let attempts = AttemptsRepo::new(pool.clone());

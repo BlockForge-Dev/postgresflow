@@ -25,6 +25,7 @@ impl JobError {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct JobContext {
     pub db: PgPool,
     pub worker_id: String,
@@ -49,6 +50,7 @@ impl HandlerRegistry {
         }
     }
 
+    #[allow(dead_code)]
     pub fn register<F>(&mut self, job_type: &str, handler: F)
     where
         F: for<'a> Fn(&'a Job, &'a JobContext) -> BoxFuture<'a, Result<(), JobError>>
@@ -59,6 +61,7 @@ impl HandlerRegistry {
         self.register_with_options(job_type, handler, HandlerOptions::new());
     }
 
+    #[allow(dead_code)]
     pub fn register_with_limit<F>(
         &mut self,
         job_type: &str,

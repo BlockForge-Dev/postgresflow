@@ -209,7 +209,7 @@ async fn print_timeline(pool: &PgPool, job_id: Uuid) -> anyhow::Result<()> {
     .await?;
 
     println!(
-        "JOB: id={} queue={} type={} status={} run_at={} locked_by={:?} lock_expires_at={:?} dlq_reason={:?}",
+        "JOB: id={} queue={} type={} status={} run_at={} locked_by={:?} lock_expires_at={:?} dlq_at={:?} dlq_reason={:?}",
         job.id,
         job.queue,
         job.job_type,
@@ -217,6 +217,7 @@ async fn print_timeline(pool: &PgPool, job_id: Uuid) -> anyhow::Result<()> {
         job.run_at,
         job.locked_by,
         job.lock_expires_at,
+        job.dlq_at,
         job.dlq_reason_code
     );
 
