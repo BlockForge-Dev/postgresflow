@@ -57,6 +57,22 @@ jobs:
           echo "Postgres did not become reachable in time"
           exit 1
 
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Apply migrations for SQLx compile checks
+        shell: bash
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports[5432] }}/postgresflow_test
+        run: |
+          set -euo pipefail
+          for file in $(ls crates/postgresflow/migrations/*.sql | sort); do
+            echo "Applying ${file}"
+            psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f "${file}"
+          done
+
       - name: Cargo check (workspace)
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports[5432] }}/postgresflow_test
