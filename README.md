@@ -40,6 +40,15 @@ $env:RUSTFLAGS="-D warnings"
 docker compose down
 ```
 
+## Documentation Index
+
+- Architecture: `docs/ARCHITECTURE.md`
+- API reference: `docs/API.md`
+- Operations runbook: `docs/OPERATIONS.md`
+- Benchmarking methodology: `docs/BENCHMARKING.md`
+- Contributor workflow: `CONTRIBUTING.md`
+- Release process: `docs/RELEASE.md`
+
 ## Quickstart (Docker)
 
 1. Copy env template:
@@ -248,6 +257,8 @@ bash scripts/load/run.sh 4 20000
 Outputs approximate jobs/sec and basic container stats.
 Note: total workers = 1 (pgflow) + <workers> (worker profile).
 Windows: run from Git Bash or WSL.
+
+For repeatable benchmark methodology and reporting format, see `docs/BENCHMARKING.md`.
 
 ## Integration (Production)
 
