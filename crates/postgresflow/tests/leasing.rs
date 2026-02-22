@@ -5,6 +5,7 @@ use common::{insert_job, setup_db};
 
 use postgresflow::jobs::JobsRepo;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -237,4 +238,38 @@ async fn reap_only_reaps_expired_running_jobs() {
     let (status, locked_by) = get_job_status_and_locked_by(&pool, job_id).await;
     assert_eq!(status, "running");
     assert_eq!(locked_by.as_deref(), Some("worker-a"));
+}
+
+#[tokio::test]
+#[serial]
+async fn batch_leasing_claims_expected_count_without_duplicates() {
+    let pool = setup_db().await;
+    let repo = JobsRepo::new(pool.clone());
+
+    for _ in 0..5 {
+        let _ = insert_job(&pool, "default").await;
+    }
+
+    let leased_1 = repo
+        .lease_jobs_batch("default", "worker-a", 30, 3)
+        .await
+        .unwrap();
+    assert_eq!(leased_1.len(), 3);
+
+    let ids_1: HashSet<Uuid> = leased_1.iter().map(|j| j.id).collect();
+    assert_eq!(ids_1.len(), leased_1.len(), "duplicate job in first batch");
+
+    let leased_2 = repo
+        .lease_jobs_batch("default", "worker-a", 30, 3)
+        .await
+        .unwrap();
+    assert_eq!(leased_2.len(), 2);
+
+    let ids_2: HashSet<Uuid> = leased_2.iter().map(|j| j.id).collect();
+    assert_eq!(ids_2.len(), leased_2.len(), "duplicate job in second batch");
+
+    assert!(
+        ids_1.is_disjoint(&ids_2),
+        "the same job was leased in two batches"
+    );
 }

@@ -32,17 +32,23 @@ impl PolicyDecisionsRepo {
     ) -> anyhow::Result<Uuid> {
         let id = Uuid::new_v4();
 
-        sqlx::query!(
+        sqlx::query(
             r#"
-            INSERT INTO policy_decisions (id, job_id, decision, reason_code, details_json)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO policy_decisions (
+              id, dataset_id, job_id, decision, reason_code, details_json
+            )
+            VALUES (
+              $1,
+              (SELECT dataset_id FROM jobs WHERE id = $2 LIMIT 1),
+              $2, $3, $4, $5
+            )
             "#,
-            id,
-            job_id,
-            decision,
-            reason_code,
-            details_json
         )
+        .bind(id)
+        .bind(job_id)
+        .bind(decision)
+        .bind(reason_code)
+        .bind(details_json)
         .execute(&self.pool)
         .await?;
 

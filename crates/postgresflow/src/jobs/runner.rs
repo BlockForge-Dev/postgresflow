@@ -1,10 +1,10 @@
 use crate::jobs::{
     attempts::AttemptsRepo,
     repo::JobsRepo,
-    retry::{ErrorClass, RetryConfig, classify_error, next_delay_seconds},
+    retry::{classify_error, next_delay_seconds, ErrorClass, RetryConfig},
 };
 use chrono::Utc;
-use rand::{SeedableRng, rngs::StdRng};
+use rand::{rngs::StdRng, SeedableRng};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -35,6 +35,31 @@ impl JobRunner {
             .await?;
 
         self.jobs.mark_succeeded(job_id, worker_id).await?;
+        Ok(())
+    }
+
+    pub async fn on_success_batch(
+        &self,
+        dataset_id: &str,
+        updates: &[(Uuid, Uuid, i32)],
+        worker_id: &str,
+    ) -> anyhow::Result<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        let attempt_updates: Vec<(Uuid, i32)> = updates
+            .iter()
+            .map(|(_, attempt_id, latency_ms)| (*attempt_id, *latency_ms))
+            .collect();
+        let job_ids: Vec<Uuid> = updates.iter().map(|(job_id, _, _)| *job_id).collect();
+
+        self.attempts
+            .finish_succeeded_batch(&attempt_updates)
+            .await?;
+        self.jobs
+            .mark_succeeded_batch_for_dataset(dataset_id, &job_ids, worker_id)
+            .await?;
         Ok(())
     }
 

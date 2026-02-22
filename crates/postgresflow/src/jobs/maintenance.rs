@@ -20,15 +20,37 @@ impl MaintenanceRepo {
     ) -> anyhow::Result<u64> {
         let mut tx = self.pool.begin().await?;
 
-        // Insert into archive (ignore if already archived)
-        let inserted = sqlx::query!(
+        // Best-effort monthly partition bootstrap (no-op on older schemas).
+        sqlx::query(
+            r#"
+            DO $$
+            BEGIN
+              IF to_regprocedure('public.ensure_jobs_archive_partition(timestamp with time zone)') IS NOT NULL THEN
+                PERFORM public.ensure_jobs_archive_partition(now());
+                PERFORM public.ensure_jobs_archive_partition(now() + interval '1 month');
+              END IF;
+            END
+            $$;
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        // Insert into archive while avoiding duplicates by id.
+        let _inserted = sqlx::query(
             r#"
             WITH candidates AS (
-                SELECT *
+                SELECT
+                  id, replay_of_job_id,
+                  queue, job_type, payload_json,
+                  run_at, status, priority, max_attempts,
+                  dlq_reason_code, dlq_at,
+                  created_at, updated_at
                 FROM jobs
                 WHERE status = 'succeeded'
                   AND updated_at < $1
                 ORDER BY updated_at ASC
+                FOR UPDATE SKIP LOCKED
                 LIMIT $2
             )
             INSERT INTO jobs_archive (
@@ -45,18 +67,22 @@ impl MaintenanceRepo {
               c.dlq_reason_code, c.dlq_at,
               c.created_at, c.updated_at
             FROM candidates c
-            ON CONFLICT (id) DO NOTHING
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM jobs_archive a
+              WHERE a.id = c.id
+            )
             "#,
-            cutoff,
-            batch
         )
+        .bind(cutoff)
+        .bind(batch)
         .execute(&mut *tx)
         .await?
         .rows_affected();
 
         // Delete archived jobs from main table
         // Only delete jobs that exist in archive (safety)
-        let deleted = sqlx::query!(
+        let deleted = sqlx::query(
             r#"
             DELETE FROM jobs j
             USING jobs_archive a
@@ -64,8 +90,8 @@ impl MaintenanceRepo {
               AND j.status = 'succeeded'
               AND j.updated_at < $1
             "#,
-            cutoff
         )
+        .bind(cutoff)
         .execute(&mut *tx)
         .await?
         .rows_affected();
@@ -73,7 +99,7 @@ impl MaintenanceRepo {
         tx.commit().await?;
 
         // deleted is the true "archived & removed" count
-        Ok(deleted.min(inserted))
+        Ok(deleted)
     }
 
     /// Delete attempts + policy decisions for succeeded jobs older than `cutoff`.

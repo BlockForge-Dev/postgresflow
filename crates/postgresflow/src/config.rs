@@ -12,7 +12,11 @@ pub struct Config {
     pub worker_id: String,
     pub queue: String,
     pub lease_seconds: i64,
+    pub dequeue_batch_size: i64,
+    pub reap_interval_ms: u64,
+    pub verbose_job_logs: bool,
     pub admin_addr: Option<String>,
+    pub api_token: Option<String>,
     pub migrate_on_startup: bool,
     pub max_payload_bytes: usize,
     pub max_enqueues_per_minute_per_queue: i64,
@@ -39,8 +43,22 @@ impl Config {
             .and_then(|s| s.parse().ok())
             .unwrap_or(10);
 
+        let dequeue_batch_size = env_or_fallback("PGFLOW_DEQUEUE_BATCH_SIZE", "DEQUEUE_BATCH_SIZE")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(256)
+            .clamp(1, 4096);
+
+        let reap_interval_ms = env_or_fallback("PGFLOW_REAP_INTERVAL_MS", "REAP_INTERVAL_MS")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5_000)
+            .clamp(250, 60_000);
+
+        let verbose_job_logs = env_bool("PGFLOW_VERBOSE_JOB_LOGS").unwrap_or(false);
+
         let admin_addr = env_or_fallback("PGFLOW_ADMIN_ADDR", "ADMIN_ADDR")
             .and_then(|s| normalize_optional_addr(&s));
+
+        let api_token = env_or_fallback("PGFLOW_API_TOKEN", "API_TOKEN");
 
         let migrate_on_startup = env_bool("PGFLOW_MIGRATE_ON_STARTUP").unwrap_or(false);
 
@@ -58,7 +76,11 @@ impl Config {
             worker_id,
             queue,
             lease_seconds,
+            dequeue_batch_size,
+            reap_interval_ms,
+            verbose_job_logs,
             admin_addr,
+            api_token,
             migrate_on_startup,
             max_payload_bytes,
             max_enqueues_per_minute_per_queue,
@@ -76,7 +98,11 @@ fn env_or_fallback(primary: &str, fallback: &str) -> Option<String> {
     std::env::var(primary)
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var(fallback).ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| {
+            std::env::var(fallback)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
 }
 
 fn env_bool(key: &str) -> Option<bool> {

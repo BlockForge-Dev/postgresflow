@@ -6,6 +6,8 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Job {
+    pub dataset_id: String,
+
     pub replay_of_job_id: Option<Uuid>,
 
     pub id: Uuid,

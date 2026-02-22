@@ -17,29 +17,76 @@ impl JobsRepo {
         Self { pool }
     }
 
+    fn sanitize_dataset_queue(queue: &str) -> String {
+        let mut out = String::with_capacity(queue.len());
+        for ch in queue.chars() {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch.to_ascii_lowercase());
+            } else {
+                out.push('_');
+            }
+        }
+
+        let trimmed = out.trim_matches('_');
+        if trimmed.is_empty() {
+            "default".to_string()
+        } else {
+            trimmed.chars().take(32).collect()
+        }
+    }
+
+    fn dataset_id_for(queue: &str, at: DateTime<Utc>) -> String {
+        format!(
+            "{}_{}",
+            Self::sanitize_dataset_queue(queue),
+            at.format("%Y%m%d_%H")
+        )
+    }
+
+    async fn ensure_dataset_partition(&self, dataset_id: &str) -> anyhow::Result<()> {
+        match sqlx::query("SELECT public.ensure_jobs_dataset_partition($1)")
+            .bind(dataset_id)
+            .execute(&self.pool)
+            .await
+        {
+            Ok(_) => Ok(()),
+            // During startup races migrations may still be applying; DEFAULT partition still accepts inserts.
+            Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("42883") => {
+                Ok(())
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
     // ----------------------------
     // Enqueue helpers
     // ----------------------------
 
     pub async fn enqueue(&self, job: NewJob) -> anyhow::Result<Uuid> {
-        let rec = sqlx::query!(
+        let dataset_id = Self::dataset_id_for(&job.queue, job.run_at);
+        self.ensure_dataset_partition(&dataset_id).await?;
+
+        let id = sqlx::query_scalar::<_, Uuid>(
             r#"
-            INSERT INTO jobs (queue, job_type, payload_json, run_at, status, priority, max_attempts)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO jobs (
+                dataset_id, queue, job_type, payload_json, run_at, status, priority, max_attempts
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id
             "#,
-            job.queue,
-            job.job_type,
-            job.payload_json,
-            job.run_at,
-            JobStatus::Queued.as_str(),
-            job.priority,
-            job.max_attempts,
         )
+        .bind(dataset_id)
+        .bind(job.queue)
+        .bind(job.job_type)
+        .bind(job.payload_json)
+        .bind(job.run_at)
+        .bind(JobStatus::Queued.as_str())
+        .bind(job.priority)
+        .bind(job.max_attempts)
         .fetch_one(&self.pool)
         .await?;
 
-        Ok(rec.id)
+        Ok(id)
     }
 
     pub async fn enqueue_now(
@@ -343,7 +390,7 @@ impl JobsRepo {
     // Leasing + Storm Control + Policy Decisions Log (Milestone 11)
     // ----------------------------
 
-    /// Lease exactly one runnable job for this worker.
+    /// Lease up to `batch_size` runnable jobs for this worker.
     ///
     /// Correctness: SELECT ... FOR UPDATE SKIP LOCKED
     ///
@@ -353,18 +400,16 @@ impl JobsRepo {
     ///
     /// If exceeded:
     /// - write a row into policy_decisions
-    /// - reschedule the candidate slightly (throttle_delay_ms)
-    /// - return None
-    ///
-    ///
-    //Exactly-once-at-a-time leasing (no two workers claim the same job)
-    //Please give me ONE ready job from queue X, and make it officially mine for N seconds, so nobody else can take it.
-    pub async fn lease_one_job(
+    /// - reschedule one candidate slightly (throttle_delay_ms)
+    /// - return an empty batch
+    pub async fn lease_jobs_batch(
         &self,
         queue: &str,
         worker_id: &str,
         lease_seconds: i64,
-    ) -> anyhow::Result<Option<Job>> {
+        batch_size: i64,
+    ) -> anyhow::Result<Vec<Job>> {
+        let batch_size = batch_size.clamp(1, 4096);
         let mut tx = self.pool.begin().await?;
 
         // 0) Load queue policy (defaults: basically unlimited)
@@ -380,46 +425,20 @@ impl JobsRepo {
         .fetch_optional(&mut *tx)
         .await?;
 
-        let (max_attempts_per_minute, max_in_flight, throttle_delay_ms) =
-            policy.unwrap_or((i32::MAX / 4, i32::MAX / 4, 250));
+        let mut max_attempts_per_minute = i32::MAX / 4;
+        let mut max_in_flight = i32::MAX / 4;
+        let mut throttle_delay_ms = 250;
+        let mut in_flight = 0_i64;
+        let mut attempts_last_min = 0_i64;
 
-        // 1) In-flight count for this queue
-        let in_flight: i64 = sqlx::query_scalar(
+        let dataset_id = sqlx::query_scalar::<_, String>(
             r#"
-            SELECT COUNT(*)
-            FROM jobs
-            WHERE queue = $1 AND status = 'running'
-            "#,
-        )
-        .bind(queue)
-        .fetch_one(&mut *tx)
-        .await?;
-
-        // 2) Attempts started in last 60 seconds for this queue
-        let attempts_last_min: i64 = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*)
-            FROM job_attempts a
-            JOIN jobs j ON j.id = a.job_id
-            WHERE j.queue = $1
-              AND a.started_at >= now() - interval '60 seconds'
-            "#,
-        )
-        .bind(queue)
-        .fetch_one(&mut *tx)
-        .await?;
-
-        // 3) Select a candidate job *and lock it*.
-        //    This lock ensures only one worker can throttle/lease this job at a time.
-        let candidate = sqlx::query_as::<_, Job>(
-            r#"
-            SELECT *
+            SELECT dataset_id
             FROM jobs
             WHERE queue = $1
               AND status = 'queued'
               AND run_at <= now()
-            ORDER BY priority DESC, run_at ASC, created_at ASC
-            FOR UPDATE SKIP LOCKED
+            ORDER BY run_at ASC, created_at ASC
             LIMIT 1
             "#,
         )
@@ -427,108 +446,178 @@ impl JobsRepo {
         .fetch_optional(&mut *tx)
         .await?;
 
-        let Some(job) = candidate else {
+        let Some(dataset_id) = dataset_id else {
             tx.commit().await?;
-            return Ok(None);
+            return Ok(Vec::new());
         };
 
-        let job_id = job.id;
+        let throttle_reason =
+            if let Some((p_max_attempts, p_max_in_flight, p_throttle_delay_ms)) = policy {
+                max_attempts_per_minute = p_max_attempts;
+                max_in_flight = p_max_in_flight;
+                throttle_delay_ms = p_throttle_delay_ms;
 
-        // 4) Enforce storm-control policies.
-        //    If throttled, write policy_decisions + reschedule candidate slightly.
-        if in_flight >= max_in_flight as i64 {
-            let decision_id = Uuid::new_v4();
-            sqlx::query!(
-                r#"
-                INSERT INTO policy_decisions (id, job_id, decision, reason_code, details_json)
-                VALUES ($1, $2, 'THROTTLED', 'IN_FLIGHT_EXCEEDED', $3)
+                // In-flight count for this queue
+                in_flight = sqlx::query_scalar(
+                    r#"
+                SELECT COUNT(*)
+                FROM jobs
+                WHERE queue = $1 AND status = 'running'
                 "#,
-                decision_id,
-                job_id,
-                json!({
-                    "queue": queue,
-                    "in_flight": in_flight,
-                    "max_in_flight": max_in_flight,
-                    "throttle_delay_ms": throttle_delay_ms
-                })
+                )
+                .bind(queue)
+                .fetch_one(&mut *tx)
+                .await?;
+
+                // Attempts started in last 60 seconds for this queue
+                attempts_last_min = sqlx::query_scalar(
+                    r#"
+                SELECT COUNT(*)
+                FROM job_attempts a
+                JOIN jobs j ON j.id = a.job_id AND j.dataset_id = a.dataset_id
+                WHERE j.queue = $1
+                  AND a.started_at >= now() - interval '60 seconds'
+                "#,
+                )
+                .bind(queue)
+                .fetch_one(&mut *tx)
+                .await?;
+
+                if in_flight >= max_in_flight as i64 {
+                    Some("IN_FLIGHT_EXCEEDED")
+                } else if attempts_last_min >= max_attempts_per_minute as i64 {
+                    Some("RETRY_RATE_EXCEEDED")
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        if let Some(reason_code) = throttle_reason {
+            let candidate_id = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                SELECT id
+                FROM jobs
+                WHERE dataset_id = $1
+                  AND queue = $2
+                  AND status = 'queued'
+                  AND run_at <= now()
+                ORDER BY priority DESC, run_at ASC, created_at ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+                "#,
             )
-            .execute(&mut *tx)
+            .bind(&dataset_id)
+            .bind(queue)
+            .fetch_optional(&mut *tx)
             .await?;
 
-            sqlx::query!(
-                r#"
-                UPDATE jobs
-                SET run_at = now() + ($2::int * interval '1 millisecond'),
-                    updated_at = now()
-                WHERE id = $1
-                "#,
-                job_id,
-                throttle_delay_ms
-            )
-            .execute(&mut *tx)
-            .await?;
+            if let Some(job_id) = candidate_id {
+                let details = match reason_code {
+                    "IN_FLIGHT_EXCEEDED" => json!({
+                        "dataset_id": dataset_id,
+                        "queue": queue,
+                        "in_flight": in_flight,
+                        "max_in_flight": max_in_flight,
+                        "throttle_delay_ms": throttle_delay_ms
+                    }),
+                    _ => json!({
+                        "dataset_id": dataset_id,
+                        "queue": queue,
+                        "attempts_last_minute": attempts_last_min,
+                        "max_attempts_per_minute": max_attempts_per_minute,
+                        "throttle_delay_ms": throttle_delay_ms
+                    }),
+                };
+
+                sqlx::query(
+                    r#"
+                    INSERT INTO policy_decisions (
+                      id, dataset_id, job_id, decision, reason_code, details_json
+                    )
+                    VALUES ($1, $2, $3, 'THROTTLED', $4, $5)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(&dataset_id)
+                .bind(job_id)
+                .bind(reason_code)
+                .bind(details)
+                .execute(&mut *tx)
+                .await?;
+
+                sqlx::query(
+                    r#"
+                    UPDATE jobs
+                    SET run_at = now() + ($2::int * interval '1 millisecond'),
+                        updated_at = now()
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(job_id)
+                .bind(throttle_delay_ms)
+                .execute(&mut *tx)
+                .await?;
+            }
 
             tx.commit().await?;
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
-        if attempts_last_min >= max_attempts_per_minute as i64 {
-            let decision_id = Uuid::new_v4();
-            sqlx::query!(
-                r#"
-                INSERT INTO policy_decisions (id, job_id, decision, reason_code, details_json)
-                VALUES ($1, $2, 'THROTTLED', 'RETRY_RATE_EXCEEDED', $3)
-                "#,
-                decision_id,
-                job_id,
-                json!({
-                    "queue": queue,
-                    "attempts_last_minute": attempts_last_min,
-                    "max_attempts_per_minute": max_attempts_per_minute,
-                    "throttle_delay_ms": throttle_delay_ms
-                })
-            )
-            .execute(&mut *tx)
-            .await?;
-
-            sqlx::query!(
-                r#"
-                UPDATE jobs
-                SET run_at = now() + ($2::int * interval '1 millisecond'),
-                    updated_at = now()
-                WHERE id = $1
-                "#,
-                job_id,
-                throttle_delay_ms
-            )
-            .execute(&mut *tx)
-            .await?;
-
-            tx.commit().await?;
-            return Ok(None);
-        }
-
-        // 5) Lease the job for real
+        // 3) Lease a batch in one round-trip.
         let leased = sqlx::query_as::<_, Job>(
             r#"
-            UPDATE jobs
-            SET status = 'running',
-                locked_by = $2,
-                locked_at = now(),
-                lock_expires_at = now() + ($3::int * interval '1 second'),
-                updated_at = now()
-            WHERE id = $1
-            RETURNING *
+            WITH candidates AS (
+                SELECT id
+                FROM jobs
+                WHERE dataset_id = $1
+                  AND queue = $2
+                  AND status = 'queued'
+                  AND run_at <= now()
+                ORDER BY priority DESC, run_at ASC, created_at ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT $3
+            ),
+            leased AS (
+                UPDATE jobs j
+                SET status = 'running',
+                    locked_by = $4,
+                    locked_at = now(),
+                    lock_expires_at = now() + ($5::int * interval '1 second'),
+                    updated_at = now()
+                FROM candidates c
+                WHERE j.id = c.id
+                RETURNING j.*
+            )
+            SELECT *
+            FROM leased
+            ORDER BY priority DESC, run_at ASC, created_at ASC
             "#,
         )
-        .bind(job_id)
+        .bind(&dataset_id)
+        .bind(queue)
+        .bind(batch_size)
         .bind(worker_id)
         .bind(lease_seconds)
-        .fetch_one(&mut *tx)
+        .fetch_all(&mut *tx)
         .await?;
 
         tx.commit().await?;
-        Ok(Some(leased))
+        Ok(leased)
+    }
+
+    /// Compatibility helper for call sites/tests that still lease one-by-one.
+    pub async fn lease_one_job(
+        &self,
+        queue: &str,
+        worker_id: &str,
+        lease_seconds: i64,
+    ) -> anyhow::Result<Option<Job>> {
+        let mut jobs = self
+            .lease_jobs_batch(queue, worker_id, lease_seconds, 1)
+            .await?;
+        Ok(jobs.pop())
     }
 
     // ----------------------------
@@ -558,6 +647,69 @@ impl JobsRepo {
     // ----------------------------
     // State transitions
     // ----------------------------
+
+    /// Fast-path for successful batch execution: transitions many jobs in one statement.
+    pub async fn mark_succeeded_batch(
+        &self,
+        job_ids: &[Uuid],
+        worker_id: &str,
+    ) -> anyhow::Result<u64> {
+        if job_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let res = sqlx::query(
+            r#"
+            UPDATE jobs
+            SET status = 'succeeded',
+                locked_at = NULL,
+                locked_by = NULL,
+                lock_expires_at = NULL,
+                updated_at = now()
+            WHERE id = ANY($1)
+              AND locked_by = $2
+            "#,
+        )
+        .bind(job_ids)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected())
+    }
+
+    /// Dataset-aware fast-path for partition-pruned successful batch updates.
+    pub async fn mark_succeeded_batch_for_dataset(
+        &self,
+        dataset_id: &str,
+        job_ids: &[Uuid],
+        worker_id: &str,
+    ) -> anyhow::Result<u64> {
+        if job_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let res = sqlx::query(
+            r#"
+            UPDATE jobs
+            SET status = 'succeeded',
+                locked_at = NULL,
+                locked_by = NULL,
+                lock_expires_at = NULL,
+                updated_at = now()
+            WHERE dataset_id = $1
+              AND id = ANY($2)
+              AND locked_by = $3
+            "#,
+        )
+        .bind(dataset_id)
+        .bind(job_ids)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected())
+    }
 
     pub async fn mark_succeeded(&self, job_id: Uuid, worker_id: &str) -> anyhow::Result<()> {
         sqlx::query!(
@@ -702,35 +854,40 @@ impl JobsRepo {
 
         let new_queue = override_queue.unwrap_or(src.queue.as_str()).to_string();
         let new_run_at = override_run_at.unwrap_or_else(|| Utc::now());
+        let new_dataset_id = Self::dataset_id_for(&new_queue, new_run_at);
+        self.ensure_dataset_partition(&new_dataset_id).await?;
 
-        let rec = sqlx::query!(
+        let new_id = sqlx::query_scalar::<_, Uuid>(
             r#"
             INSERT INTO jobs (
+                dataset_id,
                 queue, job_type, payload_json, run_at, status, priority, max_attempts,
                 locked_at, locked_by, lock_expires_at,
                 dlq_reason_code, dlq_at,
                 replay_of_job_id
             )
             VALUES (
-                $1, $2, $3, $4, 'queued', $5, $6,
+                $1,
+                $2, $3, $4, $5, 'queued', $6, $7,
                 NULL, NULL, NULL,
                 NULL, NULL,
-                $7
+                $8
             )
             RETURNING id
             "#,
-            new_queue,
-            src.job_type,
-            src.payload_json,
-            new_run_at,
-            src.priority,
-            src.max_attempts,
-            src.id,
         )
+        .bind(new_dataset_id)
+        .bind(new_queue)
+        .bind(src.job_type)
+        .bind(src.payload_json)
+        .bind(new_run_at)
+        .bind(src.priority)
+        .bind(src.max_attempts)
+        .bind(src.id)
         .fetch_one(&mut *tx)
         .await?;
 
         tx.commit().await?;
-        Ok(rec.id)
+        Ok(new_id)
     }
 }

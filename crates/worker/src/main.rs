@@ -2,17 +2,37 @@ use postgresflow::api;
 use postgresflow::config;
 use postgresflow::db;
 
-use postgresflow::jobs::ingest_decisions::IngestDecisionsRepo;
 use postgresflow::jobs::enqueue_guard::{EnqueueGuard, EnqueueGuardConfig};
+use postgresflow::jobs::ingest_decisions::IngestDecisionsRepo;
 use postgresflow::jobs::maintenance::{cutoff_days, MaintenanceRepo};
 use postgresflow::jobs::metrics::MetricsRepo;
 use postgresflow::jobs::retry::RetryConfig;
 use postgresflow::jobs::runner::JobRunner;
 use postgresflow::jobs::{AttemptsRepo, JobsRepo, PolicyDecisionsRepo};
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 mod handlers;
 use handlers::{build_registry, JobContext, JobError};
+
+enum JobExecutionOutcome {
+    Succeeded {
+        job_id: Uuid,
+        attempt_id: Uuid,
+        attempt_no: i32,
+        latency_ms: i32,
+    },
+    Failed {
+        job_id: Uuid,
+        attempt_id: Uuid,
+        attempt_no: i32,
+        max_attempts: i32,
+        latency_ms: i32,
+        error_code: String,
+        error_message: String,
+    },
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -20,6 +40,9 @@ async fn main() -> anyhow::Result<()> {
 
     let queue = cfg.queue.clone();
     let lease_seconds = cfg.lease_seconds;
+    let dequeue_batch_size = cfg.dequeue_batch_size;
+    let reap_interval = Duration::from_millis(cfg.reap_interval_ms);
+    let verbose_job_logs = cfg.verbose_job_logs;
     let api_addr = cfg.admin_addr.clone();
 
     // Maintenance envs
@@ -37,11 +60,15 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(60);
 
     println!(
-        "pgflow starting... worker_id={} queue={} lease={}s api={} migrate_on_startup={} archive_after_days={} prune_history_after_days={} maintenance_interval_secs={}",
+        "pgflow starting... worker_id={} queue={} lease={}s dequeue_batch_size={} reap_interval_ms={} verbose_job_logs={} api={} auth={} migrate_on_startup={} archive_after_days={} prune_history_after_days={} maintenance_interval_secs={}",
         cfg.worker_id,
         queue,
         lease_seconds,
+        dequeue_batch_size,
+        cfg.reap_interval_ms,
+        cfg.verbose_job_logs,
         api_addr.clone().unwrap_or_else(|| "disabled".to_string()),
+        if cfg.api_token.is_some() { "enabled" } else { "disabled" },
         cfg.migrate_on_startup,
         archive_after_days,
         prune_history_after_days,
@@ -87,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
         ingest_decisions: ingest_decisions_repo.clone(),
         metrics: metrics_repo.clone(),
         enqueue_guard: enqueue_guard.clone(),
+        api_token: cfg.api_token.clone(),
     };
     let app = api::router(api_state);
 
@@ -141,69 +169,181 @@ async fn main() -> anyhow::Result<()> {
     // ---- Worker loop task ----
     let worker_id = cfg.worker_id.clone();
     let worker_queue = queue.clone();
+    let worker_batch_size = dequeue_batch_size;
+    let worker_reap_interval = reap_interval;
+    let worker_verbose_job_logs = verbose_job_logs;
 
     let worker_handle = tokio::spawn(async move {
+        let mut last_reap_at = Instant::now() - worker_reap_interval;
+
         loop {
-            // reclaim jobs from dead workers
-            let reaped = jobs_repo.reap_expired_locks().await?;
-            if reaped > 0 {
-                println!("[{}] reaped {} expired locks", worker_id, reaped);
+            // reclaim jobs from dead workers on a fixed interval to avoid hot-loop write load.
+            if last_reap_at.elapsed() >= worker_reap_interval {
+                let reaped = jobs_repo.reap_expired_locks().await?;
+                last_reap_at = Instant::now();
+                if reaped > 0 {
+                    println!("[{}] reaped {} expired locks", worker_id, reaped);
+                }
             }
 
-            // lease one job (storm-control may throttle -> returns None)
-            if let Some(job) = jobs_repo
-                .lease_one_job(&worker_queue, &worker_id, lease_seconds)
-                .await?
-            {
-                let attempt = attempts_repo.start_attempt(job.id, &worker_id).await?;
-                let start = Instant::now();
+            let batch = jobs_repo
+                .lease_jobs_batch(&worker_queue, &worker_id, lease_seconds, worker_batch_size)
+                .await?;
 
-                println!(
-                    "[{}] leased job id={} type={} attempt_no={}",
-                    worker_id, job.id, job.job_type, attempt.attempt_no
+            if batch.is_empty() {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+
+            let leased_dataset_id = batch[0].dataset_id.clone();
+            if batch.iter().any(|j| j.dataset_id != leased_dataset_id) {
+                anyhow::bail!("mixed dataset batch returned from lease query");
+            }
+
+            let dataset_ids: Vec<String> = batch.iter().map(|j| j.dataset_id.clone()).collect();
+            let job_ids: Vec<Uuid> = batch.iter().map(|j| j.id).collect();
+
+            let started_attempts = attempts_repo
+                .start_attempts_batch(&dataset_ids, &job_ids, &worker_id)
+                .await?;
+
+            if started_attempts.len() != batch.len() {
+                anyhow::bail!(
+                    "attempt insert count mismatch: inserted={} leased={}",
+                    started_attempts.len(),
+                    batch.len()
                 );
+            }
 
-                let result: Result<(), JobError> = match registry.handler_for(&job.job_type) {
-                    Some(entry) => entry.run(&job, &ctx).await,
-                    None => Err(JobError::new(
-                        "UNKNOWN_JOB_TYPE",
-                        format!("no handler for job_type={}", job.job_type),
-                    )),
-                };
+            let mut attempts_by_job: HashMap<Uuid, (Uuid, i32)> = started_attempts
+                .into_iter()
+                .map(|(job_id, attempt_id, attempt_no)| (job_id, (attempt_id, attempt_no)))
+                .collect();
 
-                let latency_ms = start.elapsed().as_millis() as i32;
+            let mut join_set = tokio::task::JoinSet::new();
+            for job in batch {
+                let registry = registry.clone();
+                let ctx = ctx.clone();
+                let worker_id_for_task = worker_id.clone();
+                let verbose_job_logs_for_task = worker_verbose_job_logs;
+                let (attempt_id, attempt_no) = attempts_by_job
+                    .remove(&job.id)
+                    .ok_or_else(|| anyhow::anyhow!("missing started attempt for job {}", job.id))?;
 
-                match result {
-                    Ok(()) => {
-                        runner
-                            .on_success(job.id, attempt.id, &worker_id, latency_ms)
-                            .await?;
+                join_set.spawn(async move {
+                    let start = Instant::now();
+
+                    if verbose_job_logs_for_task {
                         println!(
-                            "[{}] succeeded job id={} attempt_no={} latency_ms={}",
-                            worker_id, job.id, attempt.attempt_no, latency_ms
+                            "[{}] leased job id={} type={} attempt_no={}",
+                            worker_id_for_task, job.id, job.job_type, attempt_no
                         );
                     }
-                    Err(err) => {
-                        runner
-                            .on_failure(
-                                job.id,
-                                attempt.id,
-                                &worker_id,
-                                latency_ms,
-                                err.code,
-                                &err.message,
-                                attempt.attempt_no,
-                                job.max_attempts,
-                            )
-                            .await?;
-                        println!(
-                            "[{}] failed job id={} attempt_no={} code={} (retry/DLQ rules applied)",
-                            worker_id, job.id, attempt.attempt_no, err.code
-                        );
+
+                    let result: Result<(), JobError> = match registry.handler_for(&job.job_type) {
+                        Some(entry) => entry.run(&job, &ctx).await,
+                        None => Err(JobError::new(
+                            "UNKNOWN_JOB_TYPE",
+                            format!("no handler for job_type={}", job.job_type),
+                        )),
+                    };
+
+                    let latency_ms = start.elapsed().as_millis() as i32;
+                    let outcome = match result {
+                        Ok(()) => JobExecutionOutcome::Succeeded {
+                            job_id: job.id,
+                            attempt_id,
+                            attempt_no,
+                            latency_ms,
+                        },
+                        Err(err) => JobExecutionOutcome::Failed {
+                            job_id: job.id,
+                            attempt_id,
+                            attempt_no,
+                            max_attempts: job.max_attempts,
+                            latency_ms,
+                            error_code: err.code.to_string(),
+                            error_message: err.message,
+                        },
+                    };
+
+                    Ok::<JobExecutionOutcome, anyhow::Error>(outcome)
+                });
+            }
+
+            let mut succeeded_batch: Vec<(Uuid, Uuid, i32)> = Vec::new();
+            let mut failed_batch: Vec<(Uuid, Uuid, i32, i32, i32, String, String)> = Vec::new();
+
+            while let Some(joined) = join_set.join_next().await {
+                match joined?? {
+                    JobExecutionOutcome::Succeeded {
+                        job_id,
+                        attempt_id,
+                        attempt_no,
+                        latency_ms,
+                    } => {
+                        if worker_verbose_job_logs {
+                            println!(
+                                "[{}] succeeded job id={} attempt_no={} latency_ms={}",
+                                worker_id, job_id, attempt_no, latency_ms
+                            );
+                        }
+                        succeeded_batch.push((job_id, attempt_id, latency_ms));
+                    }
+                    JobExecutionOutcome::Failed {
+                        job_id,
+                        attempt_id,
+                        attempt_no,
+                        max_attempts,
+                        latency_ms,
+                        error_code,
+                        error_message,
+                    } => {
+                        failed_batch.push((
+                            job_id,
+                            attempt_id,
+                            attempt_no,
+                            max_attempts,
+                            latency_ms,
+                            error_code,
+                            error_message,
+                        ));
                     }
                 }
-            } else {
-                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+
+            runner
+                .on_success_batch(&leased_dataset_id, &succeeded_batch, &worker_id)
+                .await?;
+
+            for (
+                job_id,
+                attempt_id,
+                attempt_no,
+                max_attempts,
+                latency_ms,
+                error_code,
+                error_message,
+            ) in failed_batch
+            {
+                runner
+                    .on_failure(
+                        job_id,
+                        attempt_id,
+                        &worker_id,
+                        latency_ms,
+                        &error_code,
+                        &error_message,
+                        attempt_no,
+                        max_attempts,
+                    )
+                    .await?;
+                if worker_verbose_job_logs {
+                    println!(
+                        "[{}] failed job id={} attempt_no={} code={} (retry/DLQ rules applied)",
+                        worker_id, job_id, attempt_no, error_code
+                    );
+                }
             }
         }
 

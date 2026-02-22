@@ -1,64 +1,107 @@
 # Benchmarking Guide
 
 ## Goal
-Produce repeatable throughput and latency measurements for PostgresFlow under controlled load.
+Measure throughput and job state outcomes in a repeatable way for the Postgres-only flow.
 
 This guide standardizes:
-- test setup
-- workload parameters
-- data to capture
-- report format
+- setup
+- scenario matrix
+- collection queries
+- result format
 
 ## Prerequisites
 - Docker Desktop running
-- repository built successfully
-- idle local machine (avoid unrelated heavy workloads)
+- Git Bash or WSL for `bash scripts/load/run.sh ...`
+- clean local machine (avoid heavy unrelated workloads)
 
-## Baseline Environment Record
-Before running benchmarks, capture:
-- OS and version
+## Record Environment Before Runs
+- OS version
 - CPU model and core count
-- RAM size
+- RAM
 - Docker Desktop version
-- Postgres image version (`postgres:17` from `docker-compose.yml`)
-- git commit hash
+- Postgres image version from `docker-compose.yml`
+- git commit hash (`git rev-parse --short HEAD`)
 
-## Benchmark Scenarios
-Run at least these scenarios:
-
-| Scenario | Workers (profile) | Total workers | Jobs |
-|---|---:|---:|---:|
-| S1 | 1 | 2 | 5,000 |
-| S2 | 2 | 3 | 10,000 |
-| S3 | 4 | 5 | 20,000 |
-| S4 | 8 | 9 | 40,000 |
-
-Total workers = `pgflow` + `worker` profile replicas.
-
-## Run Command
-
-From Git Bash or WSL:
+## Benchmark Script
+Run:
 
 ```bash
 bash scripts/load/run.sh WORKERS JOBS
 ```
 
-Examples:
+The script:
+- brings up compose services and worker replicas
+- waits for `jobs.dataset_id` migration readiness
+- seeds jobs into one dataset bucket
+- runs a fixed measurement window
+- prints:
+  - per-run succeeded delta
+  - dataset/global row counts
+  - approximate jobs/sec
+  - `BENCH_RESULT ...` (machine-readable summary line)
+
+Useful env vars:
+- `PGFLOW_BENCH_SECONDS` (default `30`)
+- `PGFLOW_DATASET_ID` (default `default_YYYYMMDD_HH`)
+- `PGFLOW_MAX_ATTEMPTS`
+- `PGFLOW_LOAD_JOB_TYPE`
+
+## Scenario Matrix
+Run at least:
+
+| Scenario | Worker profile replicas | Total workers | Jobs | Purpose |
+|---|---:|---:|---:|---|
+| B1 | 2 | 3 | 50,000 | verify stability and DLQ behavior |
+| B2 | 4 | 5 | 100,000 | scale-up midpoint |
+| B3 | 8 | 9 | 100,000 | high-contention throughput check |
+
+Total workers = `pgflow` + `worker` profile replicas.
+
+Example commands:
 
 ```bash
-bash scripts/load/run.sh 1 5000
-bash scripts/load/run.sh 4 20000
+PGFLOW_BENCH_SECONDS=30 bash scripts/load/run.sh 2 50000
+PGFLOW_BENCH_SECONDS=30 bash scripts/load/run.sh 8 100000
 ```
 
-The script:
-- builds and starts compose services
-- scales workers
-- inserts test jobs
-- measures completion over 30s
-- prints approximate jobs/sec and `docker stats`
+## Optional A/B Profiles
+Use the same scenario matrix for each profile:
 
-## Recommended Additional Measurements
-The load script gives throughput but not percentile latency. Capture these after each run:
+1. Safe baseline (default durability):
+```bash
+PGFLOW_PG_SYNC_COMMIT=on \
+PGFLOW_PG_FSYNC=on \
+PGFLOW_PG_FULL_PAGE_WRITES=on \
+bash scripts/load/run.sh 8 100000
+```
+
+2. Local perf profile (benchmark-only, reduced durability):
+```bash
+PGFLOW_DISABLE_SYNC_COMMIT=1 \
+PGFLOW_PG_SYNC_COMMIT=off \
+bash scripts/load/run.sh 8 100000
+```
+
+Do not use reduced durability settings for production data.
+
+## Extra SQL Checks After Each Run
+Jobs by status for the benchmark dataset:
+
+```sql
+SELECT status, COUNT(*)
+FROM jobs
+WHERE dataset_id = 'default_20260222_14'
+GROUP BY status
+ORDER BY status;
+```
+
+Global row count:
+
+```sql
+SELECT COUNT(*) AS total_rows FROM jobs;
+```
+
+Latency percentiles (recent attempts):
 
 ```sql
 SELECT
@@ -69,38 +112,35 @@ FROM job_attempts
 WHERE finished_at >= now() - interval '5 minutes';
 ```
 
-Queue outcome mix:
+Partition utilization snapshot:
 
 ```sql
-SELECT status, COUNT(*) FROM jobs GROUP BY status ORDER BY status;
+SELECT dataset_id, COUNT(*) AS rows
+FROM jobs
+GROUP BY dataset_id
+ORDER BY rows DESC
+LIMIT 20;
 ```
 
-## Interpreting Results
-- Increasing workers should improve throughput until DB saturation.
-- Rising retry rate often indicates handler instability or dependency pressure.
-- High queue depth with low jobs/sec indicates lease/handler or DB bottleneck.
-- p95/p99 latency is a better user-facing signal than mean alone.
-
 ## Reporting Template
-Use one table per commit/config:
+Use one row per scenario/profile:
 
-| Commit | Scenario | Jobs/sec | p50 ms | p95 ms | p99 ms | Success rate | Retry rate | Notes |
-|---|---|---:|---:|---:|---:|---:|---:|---|
+| Commit | Scenario | Profile | Jobs/sec | Succeeded delta | Dataset rows | Global rows | p95 ms | DLQ count | Notes |
+|---|---|---|---:|---:|---:|---:|---:|---:|---|
 
 Notes should include:
-- config changes (lease time, policy limits, worker count)
-- schema/index changes
-- any observed DB warnings (WAL, CPU saturation, locks)
+- key env vars
+- schema/index differences
+- saturation signal (CPU, WAL, locks)
 
 ## Fairness Rules
 - Run each scenario at least 3 times.
-- Report median across runs.
-- Keep config and dataset constant between compared commits.
-- Do not compare debug and release mode runs together.
+- Report median jobs/sec.
+- Keep dataset naming strategy and run window constant when comparing commits.
+- Recreate workers between runs (the script already does this).
 
 ## Cleanup
 
 ```bash
 docker compose down
 ```
-

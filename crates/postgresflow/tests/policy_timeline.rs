@@ -4,8 +4,8 @@ mod common;
 use common::setup_db;
 
 use postgresflow::jobs::{
-    AttemptsRepo, JobsRepo, PoliciesRepo, PolicyDecisionsRepo,
     timeline::{self, TimelineEvent},
+    AttemptsRepo, JobsRepo, PoliciesRepo, PolicyDecisionsRepo,
 };
 
 #[tokio::test]

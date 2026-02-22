@@ -1,7 +1,9 @@
 use axum::response::Html;
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, Request, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -28,11 +30,36 @@ pub struct ApiState {
     pub ingest_decisions: IngestDecisionsRepo,
     pub metrics: MetricsRepo,
     pub enqueue_guard: EnqueueGuard,
+    pub api_token: Option<String>,
+}
+
+async fn require_api_key(
+    State(expected): State<Option<String>>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    if let Some(expected) = expected {
+        let provided = req
+            .headers()
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok())
+            .or_else(|| {
+                req.headers()
+                    .get(header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+            });
+
+        if provided != Some(expected.as_str()) {
+            return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        }
+    }
+
+    next.run(req).await
 }
 
 pub fn router(state: ApiState) -> Router {
-    Router::new()
-        .route("/", get(admin_index))
+    let protected = Router::new()
         // Admin / inspect
         .route("/jobs", get(list_jobs).post(enqueue_job))
         .route("/jobs/:id/timeline", get(get_timeline))
@@ -43,8 +70,16 @@ pub fn router(state: ApiState) -> Router {
         // Metrics
         .route("/metrics", get(metrics))
         .route("/metrics/prom", get(metrics_prom))
-        // Health
+        .layer(middleware::from_fn_with_state(
+            state.api_token.clone(),
+            require_api_key,
+        ));
+
+    Router::new()
+        .route("/", get(admin_index))
+        // Keep health unauthenticated for readiness/liveness checks.
         .route("/health", get(health))
+        .merge(protected)
         .with_state(state)
 }
 
@@ -199,8 +234,16 @@ const ADMIN_HTML: &str = r#"<!doctype html>
     </section>
   </main>
   <script>
+    (function bootstrapApiKey() {
+      const token = new URLSearchParams(window.location.search).get("api_key");
+      if (token) localStorage.setItem("pgflow_api_key", token);
+    })();
+
     function buildHeaders(extra) {
-      return Object.assign({}, extra || {});
+      const headers = Object.assign({}, extra || {});
+      const token = localStorage.getItem("pgflow_api_key");
+      if (token) headers["x-api-key"] = token;
+      return headers;
     }
 
     async function show(path, targetId, opts) {
@@ -637,10 +680,7 @@ pub struct ExplainResponse {
     pub suggested_action: Option<String>,
 }
 
-pub async fn explain_job(
-    Path(id): Path<Uuid>,
-    State(state): State<ApiState>,
-) -> impl IntoResponse {
+pub async fn explain_job(Path(id): Path<Uuid>, State(state): State<ApiState>) -> impl IntoResponse {
     let job = match state.jobs.get_job(id).await {
         Ok(Some(job)) => job,
         Ok(None) => {

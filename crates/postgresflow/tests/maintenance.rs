@@ -5,8 +5,8 @@ use uuid::Uuid;
 mod common;
 use common::setup_db;
 
-use postgresflow::jobs::JobsRepo;
 use postgresflow::jobs::maintenance::MaintenanceRepo;
+use postgresflow::jobs::JobsRepo;
 
 #[tokio::test]
 async fn archives_old_succeeded_jobs_and_prunes_history() {

@@ -65,12 +65,21 @@ impl MetricsRepo {
         // - success_rate = succeeded / finished
         // - retry_rate = attempts with attempt_no >=2 / total attempts started
         // - mean latency = avg(latency_ms) for finished attempts
-        let row = sqlx::query!(
+        let row = sqlx::query_as::<
+            _,
+            (
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+            ),
+        >(
             r#"
             WITH a AS (
               SELECT a.*
               FROM job_attempts a
-              JOIN jobs j ON j.id = a.job_id
+              JOIN jobs j ON j.id = a.job_id AND j.dataset_id = a.dataset_id
               WHERE j.queue = $1
                 AND a.started_at >= now() - interval '60 seconds'
             ),
@@ -86,16 +95,16 @@ impl MetricsRepo {
               (SELECT COUNT(*) FROM a)::float8 AS started_count,
               COALESCE((SELECT AVG(latency_ms)::float8 FROM finished), 0.0) AS mean_latency_ms
             "#,
-            queue
         )
+        .bind(queue)
         .fetch_one(&self.pool)
         .await?;
 
-        let finished_count = row.finished_count.unwrap_or(0.0);
-        let succeeded_count = row.succeeded_count.unwrap_or(0.0);
-        let retry_count = row.retry_count.unwrap_or(0.0);
-        let started_count = row.started_count.unwrap_or(0.0);
-        let mean_latency_ms = row.mean_latency_ms.unwrap_or(0.0);
+        let finished_count = row.0.unwrap_or(0.0);
+        let succeeded_count = row.1.unwrap_or(0.0);
+        let retry_count = row.2.unwrap_or(0.0);
+        let started_count = row.3.unwrap_or(0.0);
+        let mean_latency_ms = row.4.unwrap_or(0.0);
 
         let jobs_per_sec = finished_count / 60.0;
 

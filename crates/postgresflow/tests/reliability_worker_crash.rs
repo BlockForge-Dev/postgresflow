@@ -1,5 +1,5 @@
-use serde_json::json;
 use postgresflow::jobs::{AttemptsRepo, JobsRepo};
+use serde_json::json;
 
 mod common;
 use common::setup_db;

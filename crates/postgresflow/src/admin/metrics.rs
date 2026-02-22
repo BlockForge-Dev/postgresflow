@@ -69,7 +69,7 @@ pub async fn metrics(State(st): State<AdminState>) -> Result<Json<Metrics>, (Sta
           COUNT(*) FILTER (WHERE status = 'failed')     AS failed,
           COUNT(*) FILTER (WHERE status = 'dlq')        AS dlq
         FROM jobs
-        "#
+        "#,
     )
     .fetch_one(&st.pool)
     .await
@@ -87,7 +87,7 @@ pub async fn metrics(State(st): State<AdminState>) -> Result<Json<Metrics>, (Sta
         FROM jobs
         GROUP BY queue
         ORDER BY queue
-        "#
+        "#,
     )
     .fetch_all(&st.pool)
     .await
@@ -98,10 +98,10 @@ pub async fn metrics(State(st): State<AdminState>) -> Result<Json<Metrics>, (Sta
         r#"
         SELECT j.queue AS queue, COUNT(*)::bigint AS attempts_last_min
         FROM job_attempts a
-        JOIN jobs j ON j.id = a.job_id
+        JOIN jobs j ON j.id = a.job_id AND j.dataset_id = a.dataset_id
         WHERE a.started_at >= now() - interval '1 minute'
         GROUP BY j.queue
-        "#
+        "#,
     )
     .fetch_all(&st.pool)
     .await

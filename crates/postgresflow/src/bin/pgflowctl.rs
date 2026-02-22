@@ -143,7 +143,7 @@ async fn seed_one_with_failed_attempt(
             locked_at=now(),
             lock_expires_at=now() + interval '30 seconds'
         WHERE id=$1
-        "#
+        "#,
     )
     .bind(job_id)
     .execute(pool)
@@ -158,7 +158,7 @@ async fn seed_one_with_failed_attempt(
         )
         VALUES ($1, 1, now(), now(), 'failed',
                 'TIMEOUT', 'demo timeout', 'demo-worker', 12)
-        "#
+        "#,
     )
     .bind(job_id)
     .execute(pool)
@@ -174,7 +174,7 @@ async fn seed_one_with_failed_attempt(
             locked_at=NULL,
             lock_expires_at=NULL
         WHERE id=$1
-        "#
+        "#,
     )
     .bind(job_id)
     .execute(pool)
@@ -263,17 +263,16 @@ async fn print_timeline(pool: &PgPool, job_id: Uuid) -> anyhow::Result<()> {
           WHERE job_id = $1
         ) x
         ORDER BY ts ASC
-        "#
+        "#,
     )
     .bind(job_id)
     .fetch_all(pool)
     .await?;
 
     for e in events {
-        let ts = e
-            .ts
-            .map(|t: DateTime<Utc>| t.to_rfc3339())
-            .unwrap_or_else(|| "-".to_string());
+        let ts =
+            e.ts.map(|t: DateTime<Utc>| t.to_rfc3339())
+                .unwrap_or_else(|| "-".to_string());
         let kind = e.kind.unwrap_or_else(|| "-".to_string());
         let data = e
             .data

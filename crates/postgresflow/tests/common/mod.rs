@@ -27,6 +27,7 @@ pub async fn setup_db() -> PgPool {
             policy_decisions,
             job_attempts,
             queue_policies,
+            jobs_archive,
             jobs
         RESTART IDENTITY CASCADE
         "#,

@@ -3,7 +3,8 @@
 ## Base
 - Base URL: `http://localhost:3003`
 - Content type: JSON for request/response bodies
-- Auth: none built-in (secure this at network/gateway layer)
+- Auth: optional API key via `x-api-key: <token>` (or `Authorization: Bearer <token>`) when `PGFLOW_API_TOKEN` is set
+- `GET /` and `GET /health` stay unauthenticated for local UI access and liveness checks
 
 ## Health
 
@@ -219,4 +220,3 @@ Prometheus text endpoint with:
 
 ### `GET /`
 Returns an HTML admin page that calls the endpoints above.
-

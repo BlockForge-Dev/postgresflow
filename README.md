@@ -82,7 +82,7 @@ Endpoints:
 - /health
 
 Disable the admin API by setting `PGFLOW_ADMIN_ADDR=off` in `.env`.
-Warning: the admin API is fully open in this version (no built-in auth). Keep it on localhost/private networks, or put it behind a trusted gateway before public exposure.
+Set `PGFLOW_API_TOKEN` to require `x-api-key: <token>` (or `Authorization: Bearer <token>`) on admin API endpoints.
 
 ## Verification (Exact Steps)
 
@@ -138,7 +138,7 @@ $env:DATABASE_URL=$env:TEST_DATABASE_URL
 .\scripts\tests\ci.ps1
 ```
 
-4. Manual API smoke test (no auth required):
+4. Manual API smoke test (add `x-api-key` header if `PGFLOW_API_TOKEN` is set):
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://localhost:3003/jobs -ContentType "application/json" -Body '{"queue":"default","job_type":"email_send","payload_json":{"user_id":123}}'
@@ -252,13 +252,39 @@ bash scripts/load/run.sh WORKERS JOBS
 
 Example:
 
-bash scripts/load/run.sh 4 20000
+PGFLOW_BENCH_SECONDS=30 bash scripts/load/run.sh 2 50000
+PGFLOW_BENCH_SECONDS=30 bash scripts/load/run.sh 8 100000
+
+Outputs:
+- run-local succeeded delta for the selected dataset
+- dataset and global row counts
+- approximate jobs/sec
+- a machine-readable summary line:
+  `BENCH_RESULT workers=... jobs_per_sec=... global_rows=...`
+
+Useful benchmark env vars:
+- `PGFLOW_DATASET_ID` to pin a dataset/partition for repeated runs
+- `PGFLOW_BENCH_SECONDS` to change the sample window
+- `PGFLOW_MAX_ATTEMPTS` and `PGFLOW_LOAD_JOB_TYPE` for workload shape
+
+Script notes:
+- auto-waits for `jobs.dataset_id` migration
+- creates dataset partition via `ensure_jobs_dataset_partition(...)` when available
+- recreates worker profile containers so code/env changes are applied per run
 
 Outputs approximate jobs/sec and basic container stats.
 Note: total workers = 1 (pgflow) + <workers> (worker profile).
 Windows: run from Git Bash or WSL.
 
 For repeatable benchmark methodology and reporting format, see `docs/BENCHMARKING.md`.
+
+## Throughput Features
+
+- Dataset partitioning on `jobs.dataset_id` (hourly/default bucket strategy supported).
+- Batch dequeue/lease path with dequeue index tuning for queue scans.
+- Batch attempt lifecycle writes (`start_attempts_batch`) and batch success acks.
+- Archive/prune maintenance hooks for long-term table/index health.
+- Optional API key auth on admin API via `PGFLOW_API_TOKEN`.
 
 ## Integration (Production)
 
@@ -304,7 +330,13 @@ docker compose --profile worker up -d --scale worker=4
 
 - `PGFLOW_MAX_PAYLOAD_BYTES` and `PGFLOW_MAX_ENQUEUE_PER_MINUTE` for guardrails.
 - `PGFLOW_LEASE_SECONDS` for lock timeouts.
+- `PGFLOW_DEQUEUE_BATCH_SIZE` for batch leasing per poll.
+- `PGFLOW_REAP_INTERVAL_MS` to control orphan-lease reap cadence.
+- `PGFLOW_VERBOSE_JOB_LOGS` to enable/disable per-job hot-path logs.
+- `PGFLOW_DB_MAX_CONNECTIONS` and `PGFLOW_DB_ACQUIRE_TIMEOUT_SECS` for pool sizing.
+- `PGFLOW_DISABLE_SYNC_COMMIT` and `PGFLOW_DISABLE_JIT` for DB session tuning.
 - `ARCHIVE_SUCCEEDED_AFTER_DAYS` and `PRUNE_HISTORY_AFTER_DAYS` for retention.
+- `PGFLOW_API_TOKEN` to require `x-api-key` / bearer token on admin endpoints.
 
 ## Production Checklist
 

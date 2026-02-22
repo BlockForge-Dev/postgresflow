@@ -5,9 +5,8 @@ use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
 use tokio::{sync::Semaphore, time::timeout};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
-type HandlerFn = dyn for<'a> Fn(&'a Job, &'a JobContext) -> BoxFuture<'a, Result<(), JobError>>
-    + Send
-    + Sync;
+type HandlerFn =
+    dyn for<'a> Fn(&'a Job, &'a JobContext) -> BoxFuture<'a, Result<(), JobError>> + Send + Sync;
 
 #[derive(Debug)]
 pub struct JobError {
@@ -62,12 +61,7 @@ impl HandlerRegistry {
     }
 
     #[allow(dead_code)]
-    pub fn register_with_limit<F>(
-        &mut self,
-        job_type: &str,
-        handler: F,
-        max_concurrency: usize,
-    )
+    pub fn register_with_limit<F>(&mut self, job_type: &str, handler: F, max_concurrency: usize)
     where
         F: for<'a> Fn(&'a Job, &'a JobContext) -> BoxFuture<'a, Result<(), JobError>>
             + Send
@@ -81,26 +75,22 @@ impl HandlerRegistry {
         );
     }
 
-    pub fn register_with_timeout<F>(
-        &mut self,
-        job_type: &str,
-        handler: F,
-        timeout_dur: Duration,
-    ) where
+    pub fn register_with_timeout<F>(&mut self, job_type: &str, handler: F, timeout_dur: Duration)
+    where
         F: for<'a> Fn(&'a Job, &'a JobContext) -> BoxFuture<'a, Result<(), JobError>>
             + Send
             + Sync
             + 'static,
     {
-        self.register_with_options(job_type, handler, HandlerOptions::new().timeout(timeout_dur));
+        self.register_with_options(
+            job_type,
+            handler,
+            HandlerOptions::new().timeout(timeout_dur),
+        );
     }
 
-    pub fn register_with_options<F>(
-        &mut self,
-        job_type: &str,
-        handler: F,
-        opts: HandlerOptions,
-    ) where
+    pub fn register_with_options<F>(&mut self, job_type: &str, handler: F, opts: HandlerOptions)
+    where
         F: for<'a> Fn(&'a Job, &'a JobContext) -> BoxFuture<'a, Result<(), JobError>>
             + Send
             + Sync
@@ -191,9 +181,7 @@ fn parse_payload<T: for<'de> Deserialize<'de>>(job: &Job) -> Result<T, JobError>
         .map_err(|e| JobError::new("BAD_PAYLOAD", e.to_string()))
 }
 
-fn boxed<'a, T>(
-    fut: impl std::future::Future<Output = T> + Send + 'a,
-) -> BoxFuture<'a, T> {
+fn boxed<'a, T>(fut: impl std::future::Future<Output = T> + Send + 'a) -> BoxFuture<'a, T> {
     Box::pin(fut)
 }
 
@@ -201,6 +189,11 @@ pub fn build_registry() -> Arc<HandlerRegistry> {
     let mut registry = HandlerRegistry::new();
 
     // Demo handlers. Replace these with your real handlers.
+    registry.register_with_timeout(
+        "ok",
+        |_job, _ctx| boxed(async move { Ok(()) }),
+        Duration::from_secs(5),
+    );
     registry.register_with_timeout(
         "demo_ok",
         |_job, _ctx| {

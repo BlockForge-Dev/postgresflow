@@ -10,7 +10,9 @@
 - `PGFLOW_WORKER_ID` optional (defaults from hostname/fallback)
 - `PGFLOW_QUEUE` optional (default `default`)
 - `PGFLOW_LEASE_SECONDS` optional (default `10`)
+- `PGFLOW_DEQUEUE_BATCH_SIZE` optional (default `256`)
 - `PGFLOW_ADMIN_ADDR` optional (`off` disables admin API)
+- `PGFLOW_API_TOKEN` optional (if set, admin API requires `x-api-key`)
 - `PGFLOW_MIGRATE_ON_STARTUP` optional
 - `PGFLOW_MAX_PAYLOAD_BYTES` optional
 - `PGFLOW_MAX_ENQUEUE_PER_MINUTE` optional
@@ -124,7 +126,6 @@ For production, use managed backup strategy with point-in-time recovery.
 - benchmark changes before production rollout
 
 ## Security Notes
-- Admin API has no built-in auth currently.
-- Do not expose it publicly without gateway auth and TLS.
+- Set `PGFLOW_API_TOKEN` to require API key auth on admin endpoints.
+- Keep admin API behind TLS and network controls for production.
 - Restrict network access to trusted operators/services.
-
