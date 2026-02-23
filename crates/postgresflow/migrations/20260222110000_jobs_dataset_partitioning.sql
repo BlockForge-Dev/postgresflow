@@ -48,7 +48,7 @@ BEGIN
     END IF;
 
     CREATE TABLE jobs (
-      dataset_id text NOT NULL,
+      dataset_id text NOT NULL DEFAULT 'legacy',
       id uuid NOT NULL DEFAULT gen_random_uuid(),
 
       queue text NOT NULL,
@@ -134,6 +134,9 @@ BEGIN
     DROP TABLE jobs_unpartitioned_dataset;
   END IF;
 END $$;
+
+ALTER TABLE jobs
+  ALTER COLUMN dataset_id SET DEFAULT 'legacy';
 
 -- 3) Recreate trigger + indexes on partitioned jobs parent.
 DROP TRIGGER IF EXISTS trg_jobs_updated_at ON jobs;
