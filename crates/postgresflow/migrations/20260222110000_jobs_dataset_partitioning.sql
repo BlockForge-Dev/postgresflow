@@ -19,6 +19,7 @@ ALTER TABLE jobs
 DO $$
 DECLARE
   is_partitioned boolean;
+  has_replay_of boolean;
 BEGIN
   SELECT EXISTS (
     SELECT 1
@@ -83,24 +84,52 @@ BEGIN
     CREATE TABLE jobs_ds_legacy PARTITION OF jobs FOR VALUES IN ('legacy');
     CREATE TABLE jobs_ds_default PARTITION OF jobs DEFAULT;
 
-    INSERT INTO jobs (
-      dataset_id,
-      id, queue, job_type, payload_json, run_at, status, priority, max_attempts,
-      locked_at, locked_by, lock_expires_at,
-      last_error_code, last_error_message,
-      dlq_reason_code, dlq_at,
-      created_at, updated_at,
-      replay_of_job_id
+    SELECT EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'jobs_unpartitioned_dataset'
+        AND column_name = 'replay_of_job_id'
     )
-    SELECT
-      dataset_id,
-      id, queue, job_type, payload_json, run_at, status, priority, max_attempts,
-      locked_at, locked_by, lock_expires_at,
-      last_error_code, last_error_message,
-      dlq_reason_code, dlq_at,
-      created_at, updated_at,
-      replay_of_job_id
-    FROM jobs_unpartitioned_dataset;
+    INTO has_replay_of;
+
+    IF has_replay_of THEN
+      INSERT INTO jobs (
+        dataset_id,
+        id, queue, job_type, payload_json, run_at, status, priority, max_attempts,
+        locked_at, locked_by, lock_expires_at,
+        last_error_code, last_error_message,
+        dlq_reason_code, dlq_at,
+        created_at, updated_at,
+        replay_of_job_id
+      )
+      SELECT
+        dataset_id,
+        id, queue, job_type, payload_json, run_at, status, priority, max_attempts,
+        locked_at, locked_by, lock_expires_at,
+        last_error_code, last_error_message,
+        dlq_reason_code, dlq_at,
+        created_at, updated_at,
+        replay_of_job_id
+      FROM jobs_unpartitioned_dataset;
+    ELSE
+      INSERT INTO jobs (
+        dataset_id,
+        id, queue, job_type, payload_json, run_at, status, priority, max_attempts,
+        locked_at, locked_by, lock_expires_at,
+        last_error_code, last_error_message,
+        dlq_reason_code, dlq_at,
+        created_at, updated_at
+      )
+      SELECT
+        dataset_id,
+        id, queue, job_type, payload_json, run_at, status, priority, max_attempts,
+        locked_at, locked_by, lock_expires_at,
+        last_error_code, last_error_message,
+        dlq_reason_code, dlq_at,
+        created_at, updated_at
+      FROM jobs_unpartitioned_dataset;
+    END IF;
 
     DROP TABLE jobs_unpartitioned_dataset;
   END IF;

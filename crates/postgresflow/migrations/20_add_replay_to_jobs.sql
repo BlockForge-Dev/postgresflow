@@ -2,10 +2,23 @@
 ALTER TABLE jobs
 ADD COLUMN IF NOT EXISTS replay_of_job_id uuid NULL;
 
--- Add FK only if it doesn't already exist (Postgres does NOT support "IF NOT EXISTS" here)
+-- Add FK only for non-partitioned jobs tables where jobs(id) can be a direct FK target.
+-- Partitioned jobs uses (dataset_id, id) and replay lineage is handled as best-effort.
 DO $$
+DECLARE
+  is_partitioned boolean;
 BEGIN
-  IF NOT EXISTS (
+  SELECT EXISTS (
+    SELECT 1
+    FROM pg_partitioned_table pt
+    JOIN pg_class c ON c.oid = pt.partrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relname = 'jobs'
+  )
+  INTO is_partitioned;
+
+  IF (NOT is_partitioned) AND NOT EXISTS (
     SELECT 1
     FROM pg_constraint
     WHERE conname = 'jobs_replay_of_fk'
